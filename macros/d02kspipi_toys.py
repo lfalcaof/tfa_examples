@@ -27,7 +27,7 @@ import matplotlib.pyplot as plt
 
 #from context import models
 from context import models
-from models.d02kspipi import babar2008_model_amp
+from models.d02kspipi import babar2008_model_amp, belle_cache_amp
 from models.helpers import decode_model, plot_data, plot_data_mix, plot_data_comparison_mix
 
 # Import argparse for command line arguments
@@ -108,6 +108,10 @@ def babar_model_amp(x):
                     1.j*belle_model[f'Kmatrix_f_prod_1{i}_imaginarypart'][0] for i in range(1, 6)]),
         [[mpi,mpi], [mkz, mkz], [mpi], [meta, meta], [meta, metap]])
 
+
+def belle_cache_model(x):
+    return belle_cache_amp(x, phsp, os.environ['TFAEX_ROOT']+'/inputs/belle_cache.root')
+
 def Af(x, switches=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0]):#15 * [1]):
     return babar_model_amp(x)(
         switches=switches,
@@ -149,8 +153,11 @@ def Afbar(x):
 
 def mixing_model(x):
     # Calculate the amplitudes - cached
-    ampl_dz = Af(c_phsp.data1(x))
-    ampl_dzb = Afbar(c_phsp.data1(x))
+    #ampl_dz = Af(c_phsp.data1(x))
+    #ampl_dzb = Afbar(c_phsp.data1(x))
+    #
+    ampl_dz = belle_cache_model(c_phsp.data1(x))
+    ampl_dzb = belle_cache_model(c_phsp.data1(x[:,::-1]))
     # Calculate the model from the mixing parameters and time evolution operators
     def _model(x_mix_par, y_mix_par, qoverp_re, qoverp_im):
         t = c_phsp.phsp2.t(c_phsp.data2(x))

@@ -4,6 +4,8 @@ Various models to describe D0->KSππ decay
 - Belle
 - BaBar
 """
+import uproot
+import tensorflow as tf
 import amplitf.interface as atfi
 import amplitf.kinematics as atfk
 import amplitf.dynamics as atfd
@@ -528,3 +530,22 @@ def babar2008_model_amp(x, phsp,
         return ampl
 
     return _model
+
+
+def belle_cache_amp(x, phsp, file_name):
+    # Cached information
+    cached_model = uproot.open(file_name)
+    phase_values, binning_x, binning_y = cached_model["histo_phase"].to_numpy()
+    ampl_values, _, _ = cached_model["histo_amplitude"].to_numpy()
+    # calculate phase space variables for the input data
+    m2ab = phsp.m2ab(x)
+    m2bc = phsp.m2bc(x)
+    m2ac = phsp.m2ac(x)
+    # get index of the bin for each event
+    bin_x = tf.cast(tf.floor((m2ab - binning_x[0]) / (binning_x[1] - binning_x[0])), tf.int32)
+    bin_y = tf.cast(tf.floor((m2bc - binning_y[0]) / (binning_y[1] - binning_y[0])), tf.int32)
+    # get phase and amplitude values for each event
+    phase = tf.gather_nd(phase_values, tf.stack([bin_x, bin_y], axis=-1))
+    ampl_mod = tf.gather_nd(ampl_values, tf.stack([bin_x, bin_y], axis=-1))
+    ampl = atfi.cast_complex(atfi.complex_from_polar(ampl_mod, phase))
+    return ampl
