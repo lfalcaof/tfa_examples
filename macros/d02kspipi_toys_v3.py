@@ -34,27 +34,61 @@ from context import models
 from models.d02kspipi import babar2008_model_amp
 from models.helpers import decode_model, plot_data, plot_data_mix, plot_data_comparison_mix
 
-# Time acceptance model (same origin as v1)
-from acceptance_combined import make_time_model
-
 
 # -------------------- CLI --------------------
 import argparse
-parser = argparse.ArgumentParser(description="Run toy MC for D0 -> Kspipi (time-dependent DP acceptance)")
+parser = argparse.ArgumentParser(description="Run toy MC for D0 -> Kspipi (mixing + optional time acceptance + DP×time maps)")
+
 parser.add_argument("--nevents", type=int, default=100000, help="Number of events to generate")
 parser.add_argument("--seed", type=int, default=0, help="Seed for random number generator")
+
 parser.add_argument("--x", type=float, default=0.004, help="Mixing parameter x")
 parser.add_argument("--y", type=float, default=0.0064, help="Mixing parameter y")
 parser.add_argument("--qop", type=float, default=1.0, help="|q/p| for CPV in mixing")
 parser.add_argument("--qop_phase", type=float, default=0.0, help="arg(q/p) [rad]")
+
 parser.add_argument("--output", type=str, default="d02kspipi_toy_v2", help="Output file stem (without extension)")
 parser.add_argument("--dryrun", action="store_true", help="Parse & exit without running")
 
-# ACC switches (maps DP×time-binned)
+# --- analytic time acceptance (parameters taken from dt fit) ---
+parser.add_argument(
+    "--use_time_acceptance",
+    action="store_true",
+    help=("Apply time acceptance in MODE B: "
+          "A_toy(t)=f_fit(t)*exp(+t/tau) where f_fit is RooAcceptanceDT-like. "
+          "This is meant to match the dt fit that used RooAcceptanceDT as a full dt PDF.")
+)
+
+# exact-fitPDF mode switch
+parser.add_argument(
+    "--use_time_fitpdf_exact",
+    action="store_true",
+    help=("Use the dt-fit function as a full PDF exactly as in the RooAcceptanceDT fit: "
+          "force psi(t)=1 (no exp(-t/tau) from mixing) and use RooAcceptanceDT-like directly.")
+)
+
+# >>> MINIMAL ADDITION: compensate proposal in t if DecayTimePhaseSpace is not flat <<<
+parser.add_argument(
+    "--compensate_time_proposal_exp",
+    action="store_true",
+    help=("Compensate a possible exponential proposal in DecayTimePhaseSpace. "
+          "If the phsp proposes t with ~exp(-t/tau), then to obtain an exact target PDF f_fit(t) "
+          "after accept-reject we must feed f_fit(t)*exp(+t/tau). "
+          "Recommended for --use_time_fitpdf_exact if you observe residual exp(-t) in toys.")
+)
+
+parser.add_argument("--ta_x0",   type=float, default=0.2,  help="RooAcceptanceDT x0 (threshold)")
+parser.add_argument("--ta_a",    type=float, default=1.0,  help="RooAcceptanceDT a")
+parser.add_argument("--ta_b",    type=float, default=1.0,  help="RooAcceptanceDT b")
+parser.add_argument("--ta_beta", type=float, default=0.0,  help="RooAcceptanceDT beta")
+parser.add_argument("--ta_n",    type=float, default=1.0,  help="RooAcceptanceDT n")
+parser.add_argument("--ta_m",    type=float, default=1.0,  help="RooAcceptanceDT m")
+
+# --- Existing: DP×time-binned Dalitz acceptance (maps) ---
 parser.add_argument(
     "--use_acceptance",
     action="store_true",
-    help="Apply Dalitz×time acceptance from acc_time_dep_v3_dalitz.root"
+    help="Apply Dalitz×time acceptance from files"
 )
 parser.add_argument(
     "--acc_root_dp",
@@ -72,12 +106,23 @@ parser.add_argument(
     "--acc_single_tbin",
     type=int,
     default=None,
-    help=(
-        "If set (0–9), forces the use of this time-bin index for all events in the acceptance, ignoring the actual t/tau value."
-    ),
+    help=("If set (0–9), forces the use of this time-bin index for all events in the acceptance, "
+          "ignoring the actual t/tau value."),
 )
 
 args = parser.parse_args()
+
+# mutual exclusion guard
+if args.use_time_fitpdf_exact and args.use_time_acceptance:
+    raise ValueError("Use ONLY one of: --use_time_fitpdf_exact OR --use_time_acceptance")
+
+print(
+    "[INFO] time mode:",
+    "fitpdf_exact" if args.use_time_fitpdf_exact else ("time_acceptance" if args.use_time_acceptance else "default"),
+    "| compensate_time_proposal_exp =", args.compensate_time_proposal_exp,
+    "| use_acceptance_maps =", args.use_acceptance
+)
+
 
 # -------------------- constants --------------------
 mkz  = atfi.const(lp.K_S_0.mass/1000)
@@ -88,11 +133,13 @@ metap= atfi.const(lp.etap_958.mass/1000.)
 
 belle_model = decode_model(os.environ['TFAEX_ROOT']+'/params/belle_model.txt')
 
+
 # -------------------- phase spaces --------------------
 phsp  = DalitzPhaseSpace(mpi, mkz, mpi, md)
-tdz   = atfi.const(1.)
+tdz   = atfi.const(1.)                   # t in units of tau
 tphsp = DecayTimePhaseSpace(tdz)
 c_phsp= CombinedPhaseSpace(phsp, tphsp)
+
 
 # -------------------- amplitude model --------------------
 def babar_model_amp(x):
@@ -146,6 +193,7 @@ def babar_model_amp(x):
         [[mpi,mpi],[mkz,mkz],[mpi],[meta,meta],[meta,metap]]
     )
 
+
 def Af(x, switches=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0]):
     x = tf.reshape(x, (-1, 2))
     return babar_model_amp(x)(
@@ -179,11 +227,13 @@ def Af(x, switches=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0]):
         a14i=atfi.const(belle_model['rho1450_imaginarypart'][0]),
     )
 
+
 def Afbar(x):
     x = tf.reshape(x, (-1, 2))
     return Af(x[:, ::-1])
 
-# -------------------- mixing PDF --------------------
+
+# -------------------- mixing PDF (with internal time acceptance) --------------------
 def mixing_model(x):
     def _model(x_mix_par, y_mix_par, qoverp_re, qoverp_im):
         x2 = tf.reshape(x, (-1, 3))
@@ -193,15 +243,58 @@ def mixing_model(x):
         ampl_dz  = Af(s)
         ampl_dzb = Afbar(s)
 
-        tep = atfm.psip(t, y_mix_par, atfi.const(1.0))
-        tem = atfm.psim(t, y_mix_par, atfi.const(1.0))
-        tei = atfm.psii(t, x_mix_par, atfi.const(1.0))
+        tau = atfi.const(1.0)  # dt is already in units of tau
+
+        if args.use_time_fitpdf_exact:
+            # psi(t) -> 1: remove ALL physics time evolution
+            tep = atfi.const(1.0)
+            tem = atfi.const(1.0)
+            # >>> MINIMAL CHANGE: tei must be complex <<<
+            tei = atfi.complex(atfi.const(1.0), atfi.const(0.0))
+
+            # target shape = RooAcceptanceDT-like (as used in dt fit)
+            acc_t = atfm.acceptance_roo_dt(
+                t,
+                x0   = atfi.const(args.ta_x0),
+                a    = atfi.const(args.ta_a),
+                b    = atfi.const(args.ta_b),
+                beta = atfi.const(args.ta_beta),
+                n    = atfi.const(args.ta_n),
+                m    = atfi.const(args.ta_m),
+            )
+
+            # >>> MINIMAL CHANGE: compensate non-flat proposal in t if needed <<<
+            if args.compensate_time_proposal_exp:
+                # If proposal g(t) ~ exp(-t/tau), feed f(t)/g(t) ~ f(t)*exp(+t/tau)
+                acc_t = tf.cast(acc_t, atfi.fptype()) * atfi.exp(t / tau)
+
+        else:
+            # Original behaviour (unchanged)
+            tep = atfm.psip(t, y_mix_par, tau)
+            tem = atfm.psim(t, y_mix_par, tau)
+            tei = atfm.psii(t, x_mix_par, tau)
+
+            # MODE B: undo exp(-t/tau) already in psi (fit-PDF was used as full dt PDF)
+            if args.use_time_acceptance:
+                acc_t = atfm.time_acceptance_from_fitpdf(
+                    t, tau,
+                    x0   = atfi.const(args.ta_x0),
+                    a    = atfi.const(args.ta_a),
+                    b    = atfi.const(args.ta_b),
+                    beta = atfi.const(args.ta_beta),
+                    n    = atfi.const(args.ta_n),
+                    m    = atfi.const(args.ta_m),
+                )
+            else:
+                acc_t = None
 
         return atfm.mixing_density(
             ampl_dz, ampl_dzb, atfi.complex(qoverp_re, qoverp_im),
-            tep, tem, tei
+            tep, tem, tei,
+            time_acceptance=acc_t
         )
     return _model
+
 
 def base_density(x):
     return mixing_model(x)(
@@ -211,20 +304,6 @@ def base_density(x):
         qoverp_im = atfi.const(args.qop) * atfi.sin(atfi.const(args.qop_phase)),
     )
 
-# ------------------------------------------------------------
-# TIME acceptance (v1 machinery) - ONLY when --use_acceptance
-# ------------------------------------------------------------
-def attach_time_acceptance_if_requested():
-    """
-    Attach the same time-acceptance machinery used in v1 (acceptance_combined).
-    This is only activated when --use_acceptance is ON.
-    """
-    if not args.use_acceptance:
-        return
-
-    acc_model = make_time_model()   # use internal defaults of acceptance_combined
-    acc_model.dp = phsp
-    phsp.set_acceptance_model(acc_model)
 
 # -------------------- time-binned Dalitz acceptance (maps) --------------------
 class TimeBinnedDalitzAcceptance:
@@ -306,6 +385,7 @@ class TimeBinnedDalitzAcceptance:
 
         return tf.reshape(w, (-1, 1))
 
+
 td_acc = None
 
 def build_acceptance_if_requested():
@@ -328,12 +408,12 @@ def build_acceptance_if_requested():
         single_tbin=args.acc_single_tbin,
     )
 
+
 # -------------------- final density --------------------
 def density_with_optional_acc(x):
     dens = base_density(x)
     dens = tf.reshape(dens, (-1,))
 
-    # Patch mínimo: se NÃO pediu ACC, retorna densidade pura (como v1)
     if not args.use_acceptance:
         return dens
 
@@ -341,25 +421,18 @@ def density_with_optional_acc(x):
     s = c_phsp.data1(x2)
     t = c_phsp.phsp2.t(c_phsp.data2(x2))
 
-    # (1) time acceptance via v1 machinery
-    w_time = phsp.acceptance_weight(s, t)
-    w_time = tf.reshape(tf.cast(w_time, atfi.fptype()), (-1,))
-    dens = dens * w_time
-
-    # (2) DP×time acceptance maps
     w_dp = td_acc.weight(s, t)
     w_dp = tf.reshape(tf.cast(w_dp, atfi.fptype()), (-1,))
     dens = dens * w_dp
 
     return dens
 
+
 # -------------------- main --------------------
 def main():
     if args.seed is not None:
         atfi.set_seed(args.seed)
 
-    # Patch mínimo: só anexa aceitação se --use_acceptance estiver ON
-    attach_time_acceptance_if_requested()
     build_acceptance_if_requested()
 
     start_time = time.time()
@@ -375,8 +448,15 @@ def main():
     print(f"Generated {args.nevents} toys in {end_time - start_time:.2f} seconds.")
 
     out = os.environ['TFAEX_ROOT'] + '/../output/' + args.output + '.npy'
+
+    # --- MINIMAL FIX: ensure output directory exists ---
+    out_dir = os.path.dirname(out)
+    if out_dir != "":
+        os.makedirs(out_dir, exist_ok=True)
+
     np.save(out, toy_sample.numpy())
     print(f"Saved: {out}")
+
 
 if __name__ == "__main__":
     if not args.dryrun:
