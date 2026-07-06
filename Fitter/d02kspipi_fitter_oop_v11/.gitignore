@@ -1,0 +1,41 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Fitter outputs and large generated artifacts
+output_files*/
+Fitter_outputs*/
+*_seed[0-9]*/
+logs/
+root/
+json/
+figures/
+*.root
+*.npz
+*.npy
+*.png
+*.pdf
+*.log
+*.out
+*.err
+nohup.out
+
+# Jupyter/local editor state
+.ipynb_checkpoints/
+.DS_Store
+.vscode/
+.idea/
+
+# Local transfer/checkpoint folders
+*_validated_*/
+*_failed_*/
+*_local_*/
